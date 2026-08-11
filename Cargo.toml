@@ -4,4 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+itertools = "0.15.0"
 log = "0.4.32"
+pprof = { version = "0.15.0", features = ["flamegraph"]}
+tracing = "0.1.44"
+
+[profile.release]
+debug = true
+opt-level = 2
