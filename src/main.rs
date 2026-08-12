@@ -1,19 +1,11 @@
-use itertools;
-use log::debug;
-use pprof::ProfilerGuard;
 use std::{
     cmp::min,
-    collections::{HashMap, HashSet},
-    fs::{self, File},
-    io::{self, BufRead, BufReader, Read},
-    ops::Add,
+    collections::{HashSet},
+    io::{BufReader, Read},
     println,
-    str::FromStr,
     sync::{Arc, Mutex},
-    thread::{self, JoinHandle},
+    thread::{self},
 };
-
-use flate2::read::GzDecoder;
 
 fn parse_attributes(value: &str) -> String {
     for attribute in value.split(";") {
@@ -69,31 +61,32 @@ fn main() {
 
     let mut gtf_reader = BufReader::new(file_handle);
 
-    let mut missing_part = String::new();
-
-    let mut join_handles = Vec::new();
+    let mut join_handles = Vec::with_capacity(num_cpus);
 
     let genes = Arc::new(Mutex::new(HashSet::<String>::new()));
 
-    
+    let mut file_contents = String::with_capacity(gtf_size);
+    _ = gtf_reader.read_to_string(&mut file_contents);
+
+    let file_contents = Arc::new(file_contents);
+
+    let mut start = 0;
+    let mut last = chunk_size;
 
     for _i in 0..num_cpus {
-        let mut chunk = vec![0; chunk_size];
-        gtf_reader.read_exact(&mut chunk).unwrap();
-
-        let cut_off = chunk.iter().rposition(|x| *x == b'\n').unwrap();
-
-        let mut chunk = chunk.to_vec();
-
-        let new_missing_part = String::from_utf8(chunk.split_off(cut_off)).unwrap();
-
-        let mut chunk = String::from_utf8(chunk).unwrap();
-
-        chunk.insert_str(0, &missing_part);
+        let cut = if last >= gtf_size {
+            gtf_size
+        } else {
+            file_contents.get(start..last).and_then(|s| s.rfind('\n')).unwrap() + start +1
+        };
 
         let thread_genes = Arc::clone(&genes);
 
+        let file_contents = file_contents.clone();
         let join_handle = thread::spawn(move || {
+            
+            let chunk = file_contents.get(start..cut).unwrap();
+  
             let mut found_genes = HashSet::new();
             for line in chunk.split('\n') {
                 if let Some(gene) = parse_gtf_line(&line) {
@@ -104,9 +97,11 @@ fn main() {
             let mut thread_genes = thread_genes.lock().unwrap();
             thread_genes.extend(found_genes);
         });
-        join_handles.push(join_handle);
 
-        missing_part = new_missing_part;
+        start = cut;
+        last += chunk_size;
+
+        join_handles.push(join_handle);
     }
 
     join_handles
@@ -115,6 +110,6 @@ fn main() {
 
     println!(
         "{:?}",
-        genes.lock().unwrap()
+        genes.lock().unwrap().len()
     );
 }
