@@ -10,5 +10,7 @@ pprof = { version = "0.15.0", features = ["flamegraph"]}
 tracing = "0.1.44"
 
 [profile.release]
-debug = true
-opt-level = 2
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

@@ -1,41 +1,19 @@
-use itertools::{self, Itertools};
+use itertools;
+use log::debug;
 use pprof::ProfilerGuard;
 use std::{
     cmp::min,
     collections::{HashMap, HashSet},
-    fs::File,
-    io::{self, BufRead},
+    fs::{self, File},
+    io::{self, BufRead, BufReader, Read},
+    ops::Add,
     println,
     str::FromStr,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
 };
 
-use crate::Strand::{MINUS, PLUS};
-use tracing::{span, Level};
-
-#[derive(Debug)]
-enum Strand {
-    PLUS,
-    MINUS,
-}
-
-#[derive(Debug)]
-struct GTFEntry {
-    seq_id: String,
-    source: String,
-    feature: String,
-    start: usize,
-    end: usize,
-    score: Option<f64>,
-    strand: Strand,
-    frame: Option<u8>,
-    attribute: HashMap<String, String>,
-}
-
-fn get_strand(value: &str) -> Strand {
-    if value == "+" { PLUS } else { MINUS }
-}
+use flate2::read::GzDecoder;
 
 fn parse_attributes(value: &str) -> String {
     for attribute in value.split(";") {
@@ -50,26 +28,10 @@ fn parse_attributes(value: &str) -> String {
         let key = pair[0];
 
         if key == "gene_id" {
-            return String::from(attribute_value[min(1, attribute_value.len()-1)]);
+            return String::from(attribute_value[min(1, attribute_value.len() - 1)]);
         }
     }
     "".to_string()
-}
-
-fn get_value<T>(value: &str) -> Option<T>
-where
-    T: FromStr,
-{
-    if value == "." {
-        None
-    } else {
-        let result = value.parse();
-        if let Ok(result) = result {
-            Some(result)
-        } else {
-            None
-        }
-    }
 }
 
 fn parse_gtf_line(value: &str) -> Option<String> {
@@ -79,6 +41,10 @@ fn parse_gtf_line(value: &str) -> Option<String> {
     }
 
     let parts: Vec<&str> = line.split("\t").collect();
+
+    if parts.len() < 9 {
+        return None;
+    }
 
     let gene = parse_attributes(parts[8]);
 
@@ -90,54 +56,65 @@ fn parse_gtf_line(value: &str) -> Option<String> {
 }
 
 fn main() {
-    // let guard = ProfilerGuard::new(100).unwrap();
-
-    let span = span!(Level::TRACE, "my_span");
-
-    let _enter = span.enter();
-
     let file_path = "/home/felixd/Downloads/GCF_000001405.40_GRCh38.p14_genomic.gtf";
     let file_handle = std::fs::File::open(file_path).unwrap();
-    let buf = io::BufReader::with_capacity(50*1024*1024, file_handle);
 
-    let genes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let metadata = file_handle.metadata().unwrap();
 
-    let join_handles: Vec<_> = buf
-        .lines()
-        .chunks(300000)
-        .into_iter()
-        .map(|chunk| {
-            let thread_genes = Arc::clone(&genes);
-            let lines = chunk.collect_vec();
+    let gtf_size = metadata.len() as usize;
 
-            let join_handle = thread::spawn(move || {
-                let mut found_genes = Vec::new();
-                for line in lines {
-                    if let Ok(line) = line {
-                        if let Some(gene) = parse_gtf_line(&line) {
-                            found_genes.push(gene);
-                        }
-                    }
+    let num_cpus = std::thread::available_parallelism().unwrap().get();
+
+    let chunk_size = gtf_size / num_cpus;
+
+    let mut gtf_reader = BufReader::new(file_handle);
+
+    let mut missing_part = String::new();
+
+    let mut join_handles = Vec::new();
+
+    let genes = Arc::new(Mutex::new(HashSet::<String>::new()));
+
+    
+
+    for _i in 0..num_cpus {
+        let mut chunk = vec![0; chunk_size];
+        gtf_reader.read_exact(&mut chunk).unwrap();
+
+        let cut_off = chunk.iter().rposition(|x| *x == b'\n').unwrap();
+
+        let mut chunk = chunk.to_vec();
+
+        let new_missing_part = String::from_utf8(chunk.split_off(cut_off)).unwrap();
+
+        let mut chunk = String::from_utf8(chunk).unwrap();
+
+        chunk.insert_str(0, &missing_part);
+
+        let thread_genes = Arc::clone(&genes);
+
+        let join_handle = thread::spawn(move || {
+            let mut found_genes = HashSet::new();
+            for line in chunk.split('\n') {
+                if let Some(gene) = parse_gtf_line(&line) {
+                    found_genes.insert(gene);
                 }
+            }
 
-                let mut thread_genes = thread_genes.lock().unwrap();
-                thread_genes.append(&mut found_genes);
-            });
-            join_handle
-        })
-        .collect();
+            let mut thread_genes = thread_genes.lock().unwrap();
+            thread_genes.extend(found_genes);
+        });
+        join_handles.push(join_handle);
+
+        missing_part = new_missing_part;
+    }
 
     join_handles
         .into_iter()
         .for_each(|join_handle| join_handle.join().unwrap());
 
     println!(
-        "{}",
-        HashSet::<&String>::from_iter(genes.lock().unwrap().iter()).len()
+        "{:?}",
+        genes.lock().unwrap()
     );
-
-    // if let Ok(report) = guard.report().build() {
-    //     let file = File::create("flamegraph.svg").unwrap();
-    //     report.flamegraph(file).unwrap();
-    // };
 }
