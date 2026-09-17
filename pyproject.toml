@@ -4,4 +4,4 @@ build-backend = "maturin"
 
 [tool.maturin]
 profile = "release"
-editable-profile = "dev"
+editable-profile = "release"
